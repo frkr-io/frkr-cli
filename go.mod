@@ -3,7 +3,7 @@ module github.com/frkr-io/frkr-cli
 go 1.24.0
 
 require (
-	github.com/frkr-io/frkr-common v0.1.0
+	github.com/frkr-io/frkr-common v0.1.1
 	github.com/spf13/cobra v1.8.0
 )
 

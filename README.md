@@ -1,6 +1,6 @@
 # frkr-cli
 
-Command-line tool for streaming and forwarding mirrored API traffic from the frkr Traffic Mirroring Platform.
+Command-line tool for streaming and forwarding mirrored API traffic from frkr.
 
 ## Overview
 
