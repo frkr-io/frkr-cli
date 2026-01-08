@@ -39,6 +39,12 @@ var streamCmd = &cobra.Command{
 		if username != "" && password != "" {
 			credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 			authHeader = "Basic " + credentials
+		} else {
+			// Try to load token from config
+			config, err := loadConfig()
+			if err == nil && config != nil && config.AccessToken != "" {
+				authHeader = "Bearer " + config.AccessToken
+			}
 		}
 
 		// Connect to streaming gateway
