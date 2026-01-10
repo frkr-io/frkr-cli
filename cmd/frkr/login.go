@@ -19,33 +19,58 @@ var loginCmd = &cobra.Command{
 	Short: "Login to frkr",
 	Long:  `Authenticate with the frkr platform using OIDC (PKCE flow).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return loginWithPKCE()
+		// Calculate config resolution here
+		if err := resolveLoginConfig(cmd); err != nil {
+			return err
+		}
+
+		return login()
 	},
 }
-
-const (
-	// TODO: Make these configurable via flags or build time args
-	authDomain   = "https://dev-frkr.us.auth0.com" // Placeholder, should be replaced/flagged
-	clientID     = "YOUR_CLIENT_ID"                // Placeholder
-	audience     = "https://api.frkr.io"           // Placeholder
-	callbackPort = "8080"
-)
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
 }
 
-func loginWithPKCE() error {
+func login() error {
+	// Check if already logged in (skip check if force login is requested? No, existing behavior is fine)
+	store, err := loadAuthStore()
+	if err == nil && store != nil && store.IsValid() {
+		fmt.Println("Already logged in.")
+		return nil
+	}
+
 	ctx := context.Background()
+
+	// 0. Check for Basic Auth
+	if clientCfg.Auth.Username != "" && clientCfg.Auth.Password != "" {
+		fmt.Printf("Logging in with Basic Auth user: %s\n", clientCfg.Auth.Username)
+		
+		// For Basic Auth, we generally don't "validate" against an IdP proactively in this CLI design,
+		// we just save the credentials to the store so subsequent commands use them.
+		// Alternatively, we could try to call a "whoami" endpoint if one existed, but per specs we just save.
+		
+		store = &AuthTokenStore{
+			BasicAuthUsername: clientCfg.Auth.Username,
+			BasicAuthPassword: clientCfg.Auth.Password,
+		}
+		
+		if err := saveAuthStore(store); err != nil {
+			return fmt.Errorf("failed to save auth credentials: %w", err)
+		}
+		
+		fmt.Println("✅ Successfully logged in (Basic Auth Credentials Saved)!")
+		return nil
+	}
 
 	// 1. Configure OIDC
 	conf := &oauth2.Config{
-		ClientID: clientID,
+		ClientID: clientCfg.Auth.ClientID,
 		Endpoint: oauth2.Endpoint{
-			AuthURL:  authDomain + "/authorize",
-			TokenURL: authDomain + "/oauth/token",
+			AuthURL:  clientCfg.Auth.AuthDomain + "/authorize",
+			TokenURL: clientCfg.Auth.AuthDomain + "/oauth/token",
 		},
-		RedirectURL: "http://localhost:" + callbackPort + "/callback",
+		RedirectURL: "http://localhost:" + clientCfg.Auth.CallbackPort + "/callback",
 		Scopes:      []string{"openid", "profile", "email", "offline_access"},
 	}
 
@@ -57,7 +82,7 @@ func loginWithPKCE() error {
 	// 3. Setup local server
 	codeChan := make(chan string)
 	errChan := make(chan error)
-	server := &http.Server{Addr: ":" + callbackPort}
+	server := &http.Server{Addr: ":" + clientCfg.Auth.CallbackPort}
 
 	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
@@ -80,7 +105,7 @@ func loginWithPKCE() error {
 	url := conf.AuthCodeURL("state-token",
 		oauth2.SetAuthURLParam("code_challenge", challenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
-		oauth2.SetAuthURLParam("audience", audience),
+		oauth2.SetAuthURLParam("audience", clientCfg.Auth.Audience),
 	)
 
 	fmt.Printf("Opening browser to login: %s\n", url)
@@ -109,15 +134,15 @@ func loginWithPKCE() error {
 		return fmt.Errorf("failed to exchange token: %w", err)
 	}
 
-	// 7. Save Config
-	config := &Config{
+	// 7. Save State
+	store = &AuthTokenStore{
 		AccessToken:  token.AccessToken,
 		RefreshToken: token.RefreshToken,
 		Expiry:       token.Expiry.Format(time.RFC3339),
 	}
 
-	if err := saveConfig(config); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	if err := saveAuthStore(store); err != nil {
+		return fmt.Errorf("failed to save auth state: %w", err)
 	}
 
 	fmt.Println("✅ Successfully logged in!")
