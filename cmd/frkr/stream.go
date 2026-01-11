@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frkr-io/frkr-common/messages"
+	streamingv1 "github.com/frkr-io/frkr-proto/go/streaming/v1"
 	"github.com/spf13/cobra"
 )
 
@@ -99,7 +99,7 @@ var streamCmd = &cobra.Command{
 }
 
 func forwardMessageWithRetry(data, forwardURL string, timeoutSeconds, maxRetries int) error {
-	var msg messages.StreamMessage
+	var msg streamingv1.StreamMessage
 	if err := json.Unmarshal([]byte(data), &msg); err != nil {
 		return fmt.Errorf("failed to parse message: %w", err)
 	}
