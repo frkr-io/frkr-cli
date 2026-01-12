@@ -1,10 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,10 +22,11 @@ var streamCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		streamID := args[0]
-		gatewayURL, _ := cmd.Flags().GetString("gateway-url")
+		gatewayAddr, _ := cmd.Flags().GetString("gateway")
 		username, _ := cmd.Flags().GetString("username")
 		password, _ := cmd.Flags().GetString("password")
 		forwardURL, _ := cmd.Flags().GetString("forward-url")
+		insecure, _ := cmd.Flags().GetBool("insecure")
 
 		// Build auth header
 		authHeader := ""
@@ -46,27 +46,29 @@ var streamCmd = &cobra.Command{
 			}
 		}
 
-		// Connect to streaming gateway
-		url := fmt.Sprintf("%s/stream?stream_id=%s", gatewayURL, streamID)
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
+		if authHeader == "" {
+			return fmt.Errorf("authentication required: provide username/password or login first")
 		}
 
-		if authHeader != "" {
-			req.Header.Set("Authorization", authHeader)
-		}
-
-		client := &http.Client{}
-		resp, err := client.Do(req)
+		// Connect to streaming gateway via gRPC
+		fmt.Printf("🔌 Connecting to gateway %s...\n", gatewayAddr)
+		conn, err := NewGRPCConnection(gatewayAddr, insecure)
 		if err != nil {
 			return fmt.Errorf("failed to connect to gateway: %w", err)
 		}
-		defer resp.Body.Close()
+		defer conn.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("gateway error: %s - %s", resp.Status, string(body))
+		client := streamingv1.NewStreamingServiceClient(conn)
+		
+		// Open access to the stream
+		ctx := context.Background()
+		ctx = AuthenticatedContext(ctx, authHeader)
+
+		stream, err := client.OpenStream(ctx, &streamingv1.OpenStreamRequest{
+			StreamId: streamID,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to open stream: %w", err)
 		}
 
 		forwardTimeout, _ := cmd.Flags().GetInt("forward-timeout")
@@ -77,33 +79,26 @@ var streamCmd = &cobra.Command{
 		fmt.Printf("⏱️  Timeout: %ds, Max retries: %d\n", forwardTimeout, maxRetries)
 		fmt.Println("Waiting for messages...")
 
-		// Read SSE stream
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				data := strings.TrimPrefix(line, "data: ")
-				if err := forwardMessageWithRetry(data, forwardURL, forwardTimeout, maxRetries); err != nil {
-					fmt.Fprintf(os.Stderr, "❌ Error forwarding message after retries: %v\n", err)
-					continue
-				}
+		// Receive loop
+		for {
+			msg, err := stream.Recv()
+			if err == io.EOF {
+				fmt.Println("Stream closed by server")
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("error receiving message: %w", err)
+			}
+
+			if err := forwardMessageWithRetry(msg, forwardURL, forwardTimeout, maxRetries); err != nil {
+				fmt.Fprintf(os.Stderr, "❌ Error forwarding message after retries: %v\n", err)
+				continue
 			}
 		}
-
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("error reading stream: %w", err)
-		}
-
-		return nil
 	},
 }
 
-func forwardMessageWithRetry(data, forwardURL string, timeoutSeconds, maxRetries int) error {
-	var msg streamingv1.StreamMessage
-	if err := json.Unmarshal([]byte(data), &msg); err != nil {
-		return fmt.Errorf("failed to parse message: %w", err)
-	}
-
+func forwardMessageWithRetry(msg *streamingv1.StreamMessage, forwardURL string, timeoutSeconds, maxRetries int) error {
 	// Build forward URL with path and query
 	fullURL := forwardURL + msg.Path
 	if len(msg.Query) > 0 {
@@ -153,7 +148,6 @@ func forwardMessageWithRetry(data, forwardURL string, timeoutSeconds, maxRetries
 				return nil
 			}
 			// Success or server error (5xx) - log and return success for now
-			// Server errors could be retried, but we'll consider them handled
 			fmt.Printf("➡️  %s %s -> %d\n", msg.Method, msg.Path, resp.StatusCode)
 			return nil
 		}
@@ -165,12 +159,13 @@ func forwardMessageWithRetry(data, forwardURL string, timeoutSeconds, maxRetries
 }
 
 func init() {
-	streamCmd.Flags().String("gateway-url", "http://localhost:8081", "Streaming Gateway URL")
+	streamCmd.Flags().String("gateway", "localhost:8081", "Streaming Gateway Address (host:port)")
 	streamCmd.Flags().String("username", "", "Username for basic auth")
 	streamCmd.Flags().String("password", "", "Password for basic auth")
 	streamCmd.Flags().String("forward-url", "http://localhost:3001", "URL to forward requests to")
 	streamCmd.Flags().Int("forward-timeout", 30, "Timeout in seconds for forwarding requests (default: 30)")
 	streamCmd.Flags().Int("max-retries", 3, "Maximum number of retries for failed forwards (default: 3)")
+	streamCmd.Flags().Bool("insecure", false, "Use insecure connection (no TLS)")
 
 	rootCmd.AddCommand(streamCmd)
 }
