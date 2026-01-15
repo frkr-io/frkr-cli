@@ -18,15 +18,27 @@ import (
 var streamCmd = &cobra.Command{
 	Use:   "stream [stream-id]",
 	Short: "Stream messages from a frkr stream",
-	Long:  `Stream messages from the specified stream and forward them to a local URL.`,
-	Args:  cobra.ExactArgs(1),
+	Long:  `Stream messages from the specified stream and forward them to a local URL or port.`,
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		streamID := args[0]
 		gatewayAddr, _ := cmd.Flags().GetString("gateway")
 		username, _ := cmd.Flags().GetString("username")
 		password, _ := cmd.Flags().GetString("password")
 		forwardURL, _ := cmd.Flags().GetString("forward-url")
+		port, _ := cmd.Flags().GetInt("port")
 		insecure, _ := cmd.Flags().GetBool("insecure")
+
+		// Handle --port flag (mutually exclusive with --forward-url when explicitly set)
+		forwardURLChanged := cmd.Flags().Changed("forward-url")
+		portChanged := cmd.Flags().Changed("port")
+
+		if portChanged && forwardURLChanged {
+			return fmt.Errorf("--port and --forward-url are mutually exclusive")
+		}
+
+		if portChanged && port > 0 {
+			forwardURL = fmt.Sprintf("http://localhost:%d", port)
+		}
 
 		// Build auth header
 		authHeader := ""
@@ -59,10 +71,22 @@ var streamCmd = &cobra.Command{
 		defer conn.Close()
 
 		client := streamingv1.NewStreamingServiceClient(conn)
-		
-		// Open access to the stream
+
+		// Create authenticated context
 		ctx := context.Background()
 		ctx = AuthenticatedContext(ctx, authHeader)
+
+		// Determine stream ID
+		var streamID string
+		if len(args) > 0 {
+			streamID = args[0]
+		} else {
+			// List available streams and prompt user
+			streamID, err = selectStream(ctx, client)
+			if err != nil {
+				return fmt.Errorf("failed to select stream: %w", err)
+			}
+		}
 
 		stream, err := client.OpenStream(ctx, &streamingv1.OpenStreamRequest{
 			StreamId: streamID,
@@ -96,6 +120,36 @@ var streamCmd = &cobra.Command{
 			}
 		}
 	},
+}
+
+// selectStream lists available streams and prompts user to select one
+func selectStream(ctx context.Context, client streamingv1.StreamingServiceClient) (string, error) {
+	resp, err := client.ListStreams(ctx, &streamingv1.ListStreamsRequest{})
+	if err != nil {
+		return "", fmt.Errorf("failed to list streams: %w", err)
+	}
+
+	if len(resp.Streams) == 0 {
+		return "", fmt.Errorf("no streams available")
+	}
+
+	fmt.Println("\n📋 Available streams:")
+	for i, s := range resp.Streams {
+		desc := s.Description
+		if desc == "" {
+			desc = "(no description)"
+		}
+		fmt.Printf("  %d. %s - %s\n", i+1, s.Name, desc)
+	}
+
+	fmt.Print("\nSelect a stream (1-", len(resp.Streams), "): ")
+	var selection int
+	_, err = fmt.Scanf("%d", &selection)
+	if err != nil || selection < 1 || selection > len(resp.Streams) {
+		return "", fmt.Errorf("invalid selection")
+	}
+
+	return resp.Streams[selection-1].Name, nil
 }
 
 func forwardMessageWithRetry(msg *streamingv1.StreamMessage, forwardURL string, timeoutSeconds, maxRetries int) error {
@@ -163,9 +217,11 @@ func init() {
 	streamCmd.Flags().String("username", "", "Username for basic auth")
 	streamCmd.Flags().String("password", "", "Password for basic auth")
 	streamCmd.Flags().String("forward-url", "http://localhost:3001", "URL to forward requests to")
+	streamCmd.Flags().Int("port", 0, "Local port to forward to (alternative to --forward-url)")
 	streamCmd.Flags().Int("forward-timeout", 30, "Timeout in seconds for forwarding requests (default: 30)")
 	streamCmd.Flags().Int("max-retries", 3, "Maximum number of retries for failed forwards (default: 3)")
 	streamCmd.Flags().Bool("insecure", false, "Use insecure connection (no TLS)")
 
 	rootCmd.AddCommand(streamCmd)
 }
+
