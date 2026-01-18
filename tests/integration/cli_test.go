@@ -51,7 +51,7 @@ func TestStreamCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gatewayURL := "http://" + endpoint
+
 
 	// 2. Start a local server to receive forwarded requests
 	receivedMessages := make(chan string, 10)
@@ -91,9 +91,12 @@ func TestStreamCommand(t *testing.T) {
 	}
 	
 	cmd := exec.Command("go", "run", "./cmd/frkr", "stream", "test-stream",
-		"--gateway-url", gatewayURL,
+		"--gateway", endpoint,
+		"--username", "user",
+		"--password", "pass",
 		"--forward-url", forwardURL,
 		"--forward-timeout", "5",
+		"--insecure",
 	)
 	cmd.Dir = repoRoot
 	

@@ -14,7 +14,12 @@ COPY main.go .
 # 
 # I choose Option 2 for simplicity and speed of the test.
 
+ENV GOPROXY=direct
 RUN go mod init mock-gateway
+RUN go get github.com/frkr-io/frkr-proto@v0.3.0
+RUN go get google.golang.org/grpc
+RUN go get google.golang.org/protobuf
+RUN go mod tidy
 RUN go build -o server main.go
 
 CMD ["./server"]

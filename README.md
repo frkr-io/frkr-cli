@@ -50,7 +50,7 @@ You can configure the login command via flags or a YAML configuration file.
 *   `--client-id`: (Required) OIDC Client ID.
 *   `--auth-domain`: OIDC Issuer URL (Default: `https://auth.frkr.io`).
 *   `--audience`: JWT Audience (Default: `https://api.frkr.io`).
-*   `--callback-port`: Local port for the auth callback (Default: `8080`).
+*   `--callback-port`: Local port for the auth callback (Default: `38911`).
 
 **Configuration File (`frkr-login.yaml`):**
 
@@ -60,7 +60,7 @@ To avoid passing flags every time, you can place a `frkr-login.yaml` file in you
 client_id: "your-client-id"
 auth_domain: "https://your-domain.auth0.com"
 audience: "https://api.your-app.com"
-callback_port: "8080"
+callback_port: "38911"
 ```
 
 Then simply run:

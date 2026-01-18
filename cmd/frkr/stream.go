@@ -13,6 +13,7 @@ import (
 
 	streamingv1 "github.com/frkr-io/frkr-proto/go/streaming/v1"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var streamCmd = &cobra.Command{
@@ -88,8 +89,39 @@ var streamCmd = &cobra.Command{
 			}
 		}
 
+		// Parse replay flags
+		fromStr, _ := cmd.Flags().GetString("from")
+		toStr, _ := cmd.Flags().GetString("to")
+
+		var fromTimestamp *timestamppb.Timestamp
+		if fromStr != "" {
+			t, err := parseTimestampOrDuration(fromStr)
+			if err != nil {
+				return fmt.Errorf("invalid --from value: %w", err)
+			}
+			fromTimestamp = timestamppb.New(t)
+		}
+
+		var toTimestamp *timestamppb.Timestamp
+		if toStr != "" {
+			t, err := parseTimestampOrDuration(toStr)
+			if err != nil {
+				return fmt.Errorf("invalid --to value: %w", err)
+			}
+			toTimestamp = timestamppb.New(t)
+		}
+
+		// Validate Replay Range
+		if fromTimestamp != nil && toTimestamp != nil {
+			if !toTimestamp.AsTime().After(fromTimestamp.AsTime()) {
+				return fmt.Errorf("invalid time range: --to must be after --from")
+			}
+		}
+
 		stream, err := client.OpenStream(ctx, &streamingv1.OpenStreamRequest{
-			StreamId: streamID,
+			StreamId:   streamID,
+			ReplayFrom: fromTimestamp,
+			ReplayTo:   toTimestamp,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to open stream: %w", err)
@@ -212,6 +244,16 @@ func forwardMessageWithRetry(msg *streamingv1.StreamMessage, forwardURL string, 
 	return fmt.Errorf("failed after %d attempts: %w", maxRetries+1, lastErr)
 }
 
+// parseTimestampOrDuration parses a string as either RFC3339 timestamp or a duration subtraction from now
+func parseTimestampOrDuration(value string) (time.Time, error) {
+	// Try parsing as duration first (e.g., "1h", "10m")
+	if d, err := time.ParseDuration(value); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	// Try parsing as RFC3339
+	return time.Parse(time.RFC3339, value)
+}
+
 func init() {
 	streamCmd.Flags().String("gateway", "localhost:8081", "Streaming Gateway Address (host:port)")
 	streamCmd.Flags().String("username", "", "Username for basic auth")
@@ -221,6 +263,8 @@ func init() {
 	streamCmd.Flags().Int("forward-timeout", 30, "Timeout in seconds for forwarding requests (default: 30)")
 	streamCmd.Flags().Int("max-retries", 3, "Maximum number of retries for failed forwards (default: 3)")
 	streamCmd.Flags().Bool("insecure", false, "Use insecure connection (no TLS)")
+	streamCmd.Flags().String("from", "", "Start replay from timestamp (RFC3339) or duration relative to now (e.g. 1h)")
+	streamCmd.Flags().String("to", "", "End replay at timestamp (RFC3339)")
 
 	rootCmd.AddCommand(streamCmd)
 }

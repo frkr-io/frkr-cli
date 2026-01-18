@@ -1,73 +1,61 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"time"
+
+	streamingv1 "github.com/frkr-io/frkr-proto/go/streaming/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
-// Redefine locally to avoid cross-module build issues in testcontainers
-type StreamMessage struct {
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Body    string            `json:"body,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Query   map[string]string `json:"query,omitempty"`
+type server struct {
+	streamingv1.UnimplementedStreamingServiceServer
+}
+
+func (s *server) OpenStream(req *streamingv1.OpenStreamRequest, stream streamingv1.StreamingService_OpenStreamServer) error {
+	log.Printf("Client connected to stream: %s", req.StreamId)
+
+	// Send a few test messages
+	for i := 0; i < 3; i++ {
+		msg := &streamingv1.StreamMessage{
+			Method: "POST",
+			Path:   "/webhook",
+			Body:   fmt.Sprintf(`{"test": "message %d"}`, i),
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
+			TimestampNs: time.Now().UnixNano(),
+		}
+
+		if err := stream.Send(msg); err != nil {
+			log.Printf("Error sending message: %v", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *server) ListStreams(ctx context.Context, req *streamingv1.ListStreamsRequest) (*streamingv1.ListStreamsResponse, error) {
+	return &streamingv1.ListStreamsResponse{}, nil
 }
 
 func main() {
-	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
-		streamID := r.URL.Query().Get("stream_id")
-		if streamID == "" {
-			http.Error(w, "Missing stream_id", http.StatusBadRequest)
-			return
-		}
-
-		log.Printf("Client connected to stream: %s", streamID)
-
-		// Set headers for SSE
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-
-		// Flush headers
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-		flusher.Flush()
-
-		// Send a few test messages
-		for i := 0; i < 3; i++ {
-			msg := StreamMessage{
-				Method: "POST",
-				Path:   "/webhook",
-				Body:   fmt.Sprintf(`{"test": "message %d"}`, i),
-				Headers: map[string]string{
-					"Content-Type": "application/json",
-				},
-			}
-
-			data, err := json.Marshal(msg)
-			if err != nil {
-				log.Printf("Error marshalling message: %v", err)
-				continue
-			}
-
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		// Keep connection open for a bit
-		time.Sleep(2 * time.Second)
-	})
+	lis, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+	
+	s := grpc.NewServer()
+	streamingv1.RegisterStreamingServiceServer(s, &server{})
+	reflection.Register(s)
 
 	log.Println("Mock Gateway running on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal(err)
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
 	}
 }

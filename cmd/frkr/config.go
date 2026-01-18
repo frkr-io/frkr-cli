@@ -15,7 +15,7 @@ auth:
   client_id: "your-client-id"          # Required: OIDC Client ID
   auth_domain: "https://auth.frkr.io"  # Optional: OIDC Issuer/Domain
   audience: "https://api.frkr.io"      # Optional: JWT Audience
-  callback_port: "8080"                # Optional: Local port for callback
+  callback_port: "38911"                # Optional: Local port for callback
 */
 
 // AuthConfig holds OIDC authentication settings.
@@ -38,7 +38,7 @@ var (
 	defaultAuthDomain   = "https://auth.frkr.io"
 	defaultClientID     = ""
 	defaultAudience     = "https://api.frkr.io"
-	defaultCallbackPort = "8080"
+	defaultCallbackPort = "38911"
 	defaultConfigPath   = "frkr.yaml"
 
 	// Runtime configuration variables, populated by init() and resolveLoginConfig()
