@@ -61,19 +61,10 @@ func NewAuthManager(store *AuthTokenStore) *AuthManager {
 func (m *AuthManager) GetAuthHeader(ctx context.Context, allowInteractive bool, forceOAuth bool) (string, error) {
 	// 1. Check Basic Auth (unless forced to use OAuth)
 	if !forceOAuth && m.Store.BasicAuthUsername != "" && m.Store.BasicAuthPassword != "" {
-		// Basic Auth doesn't need refreshing
-		// We re-construct the basic auth header here or just return the credentials?
-		// The original code did base64 encoding.
-		// Let's defer to the caller or do it here?
-		// Existing stream.go did: "Basic " + base64(user:pass)
-		// But wait, the Store doesn't store the header, just user/pass.
-		// It's cleaner to return the token string and type, but the signature returns a full header string.
-		// Let's format it here.
 		return "Basic " + basicAuth(m.Store.BasicAuthUsername, m.Store.BasicAuthPassword), nil
 	}
 
 	// 2. OIDC Logic
-	// Load config for OIDC
 	conf := &oauth2.Config{
 		ClientID: authConfig.ClientID,
 		Endpoint: oauth2.Endpoint{
@@ -92,10 +83,7 @@ func (m *AuthManager) GetAuthHeader(ctx context.Context, allowInteractive bool, 
 		if allowInteractive {
 			// Trigger Login
 			// Note: We need to update the store after login
-			if err := login(); err != nil { // login() is in login.go, we might need to expose it nicely or better yet, make login logic part of AuthManager?
-				// For now, calling the global login() function is a bit circular if we move logic here.
-				// The plan said: "Extract InteractiveLogin logic independent of Cobra command".
-				// So we should move login logic here.
+			if err := login(); err != nil { 
 				return "", fmt.Errorf("login failed: %w", err)
 			}
 			// Reload store

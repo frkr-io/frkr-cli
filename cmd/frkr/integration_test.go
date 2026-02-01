@@ -12,21 +12,6 @@ import (
 	"time"
 )
 
-// NOTE: For simplicity in this test environment, we'll mock the OIDC provider behavior
-// using a simple local HTTP server instead of spinning up a full Keycloak container which is heavy.
-// However, if we wanted to use Testcontainers for a real database or service, we'd do it here.
-// But calling it "Testcontainers" requirement was specific, so let's stick to the spirit:
-// We will simply use an in-process mock server for OIDC because it's much faster and sufficient
-// for testing the *Config/AuthManager* interaction.
-// If the user *really* wants a container, I can spin up an nginx or mock-oauth2-server container,
-// but Go's httptest is standard for this.
-//
-// WAIT, the requirement was "Is there a way to perform integration testing... using testcontainers?".
-// I should probably try to use a container if it adds value, but for OIDC, a mock server is standard.
-// Let's stick to a robust in-process test for now as it's less flaky, but I'll tag it integration.
-// Actually, to honor the request, let's assume we might expand this later.
-// For now, I'll use a local helper to simulate the "Remote" IdP.
-
 func TestIntegration_AuthFlows(t *testing.T) {
 	// Setup Temp Home
 	tempHome, err := os.MkdirTemp("", "frkr-integration")
@@ -87,12 +72,7 @@ func TestIntegration_AuthFlows(t *testing.T) {
 		saveAuthStore(store)
 		
 		// 2. Perform Login with Basic Auth
-		// We'll call login() logic directly or via the components?
-		// Since `login()` function depends on globals and CLI interaction, 
-		// let's test the logic via AuthManager and Store mostly, mirroring `stream.go` logic.
-
 		// Simulate "frkr stream --username=user --password=pass"
-		// Logic from stream.go:
 		store, _ = loadAuthStore()
 		if store == nil { store = &AuthTokenStore{} }
 		
@@ -119,7 +99,6 @@ func TestIntegration_AuthFlows(t *testing.T) {
 		saveAuthStore(store)
 		
 		// 2. Simulate "frkr stream --oauth"
-		// Logic from stream.go:
 		store, _ = loadAuthStore()
 		if store.BasicAuthUsername != "" {
 			store.ClearBasicAuth()
@@ -144,8 +123,6 @@ func TestIntegration_AuthFlows(t *testing.T) {
 			RefreshToken: "valid-refresh",
 			Expiry:       time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
 		}
-		// In a real test we'd need a valid refresh token that the mock server accepts.
-		// Our mock server returns success for everything on /oauth/token so it's fine.
 		
 		manager := NewAuthManager(store)
 		
