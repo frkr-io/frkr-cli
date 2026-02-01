@@ -2,16 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
-	"net/http"
-	"time"
 
-	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
 )
 
 var loginCmd = &cobra.Command{
@@ -19,8 +12,8 @@ var loginCmd = &cobra.Command{
 	Short: "Login to frkr",
 	Long:  `Authenticate with the frkr platform using OIDC (PKCE flow).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Calculate config resolution here
-		if err := resolveLoginConfig(cmd); err != nil {
+		// Ensure we have necessary config to login
+		if err := validateConfig(); err != nil {
 			return err
 		}
 
@@ -30,30 +23,52 @@ var loginCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
+
+	// Register flags bounds to the authConfig global
+	loginCmd.Flags().StringVar(&authConfig.AuthDomain, "auth-domain", defaultAuthDomain, "OIDC Auth Domain")
+	loginCmd.Flags().StringVar(&authConfig.ClientID, "client-id", defaultClientID, "OIDC Client ID")
+	loginCmd.Flags().StringVar(&authConfig.Audience, "audience", defaultAudience, "OIDC Audience")
+	loginCmd.Flags().StringVar(&authConfig.CallbackPort, "callback-port", defaultCallbackPort, "Local callback port")
+	loginCmd.Flags().StringVar(&authConfig.Username, "username", "", "Basic Auth Username")
+	loginCmd.Flags().StringVar(&authConfig.Password, "password", "", "Basic Auth Password")
 }
 
-func login() error {
-	// Check if already logged in (skip check if force login is requested? No, existing behavior is fine)
-	store, err := loadAuthStore()
-	if err == nil && store != nil && store.IsValid() {
-		fmt.Println("Already logged in.")
+// validateConfig ensures that we have enough configuration to proceed with a login.
+func validateConfig() error {
+	// If Basic Auth is provided, we don't need OIDC Client ID
+	if authConfig.Username != "" || authConfig.Password != "" {
+		if authConfig.Username == "" || authConfig.Password == "" {
+			return fmt.Errorf("both --username and --password are required for basic auth")
+		}
+		// Basic auth is valid, proceed
 		return nil
 	}
 
+	// Otherwise, OIDC is required
+	if authConfig.ClientID == "" {
+		return fmt.Errorf("client-id is required (use --client-id flag or build with -ldflags)")
+	}
+
+	return nil
+}
+
+func login() error {
+	// Always overwrite existing login session (Last Write Wins)
+	store, err := loadAuthStore()
+	if err != nil || store == nil {
+		store = &AuthTokenStore{}
+	}
+	
+	manager := NewAuthManager(store)
 	ctx := context.Background()
 
 	// 0. Check for Basic Auth
-	if clientCfg.Auth.Username != "" && clientCfg.Auth.Password != "" {
-		fmt.Printf("Logging in with Basic Auth user: %s\n", clientCfg.Auth.Username)
+	if authConfig.Username != "" && authConfig.Password != "" {
+		fmt.Printf("Logging in with Basic Auth user: %s\n", authConfig.Username)
 		
-		// For Basic Auth, we generally don't "validate" against an IdP proactively in this CLI design,
-		// we just save the credentials to the store so subsequent commands use them.
-		// Alternatively, we could try to call a "whoami" endpoint if one existed, but per specs we just save.
-		
-		store = &AuthTokenStore{
-			BasicAuthUsername: clientCfg.Auth.Username,
-			BasicAuthPassword: clientCfg.Auth.Password,
-		}
+		store.ClearOIDC()
+		store.BasicAuthUsername = authConfig.Username
+		store.BasicAuthPassword = authConfig.Password
 		
 		if err := saveAuthStore(store); err != nil {
 			return fmt.Errorf("failed to save auth credentials: %w", err)
@@ -63,94 +78,6 @@ func login() error {
 		return nil
 	}
 
-	// 1. Configure OIDC
-	conf := &oauth2.Config{
-		ClientID: clientCfg.Auth.ClientID,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  clientCfg.Auth.AuthDomain + "/authorize",
-			TokenURL: clientCfg.Auth.AuthDomain + "/oauth/token",
-		},
-		RedirectURL: "http://localhost:" + clientCfg.Auth.CallbackPort + "/callback",
-		Scopes:      []string{"openid", "profile", "email", "offline_access"},
-	}
-
-	// 2. Generate PKCE Verifier and Challenge
-	verifier := generateRandomString(64)
-	hash := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(hash[:])
-
-	// 3. Setup local server
-	codeChan := make(chan string)
-	errChan := make(chan error)
-	server := &http.Server{Addr: ":" + clientCfg.Auth.CallbackPort}
-
-	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			errChan <- fmt.Errorf("no code received")
-			http.Error(w, "Login failed: No code received", http.StatusBadRequest)
-			return
-		}
-		codeChan <- code
-		fmt.Fprint(w, "<h1>Login Successful</h1><p>You can close this window and return to the CLI.</p>")
-	})
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errChan <- err
-		}
-	}()
-
-	// 4. Open Browser
-	url := conf.AuthCodeURL("state-token",
-		oauth2.SetAuthURLParam("code_challenge", challenge),
-		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
-		oauth2.SetAuthURLParam("audience", clientCfg.Auth.Audience),
-	)
-
-	fmt.Printf("Opening browser to login: %s\n", url)
-	if err := browser.OpenURL(url); err != nil {
-		fmt.Printf("Failed to open browser: %v\n", err)
-		fmt.Println("Please copy and paste the URL above into your browser.")
-	}
-
-	// 5. Wait for Code
-	var code string
-	select {
-	case code = <-codeChan:
-	case err := <-errChan:
-		return fmt.Errorf("callback server error: %w", err)
-	case <-time.After(5 * time.Minute):
-		return fmt.Errorf("login timed out")
-	}
-
-	// Shutdown server
-	server.Shutdown(ctx)
-
-	// 6. Exchange Code for Token
-	fmt.Println("Exchanging code for token...")
-	token, err := conf.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", verifier))
-	if err != nil {
-		return fmt.Errorf("failed to exchange token: %w", err)
-	}
-
-	// 7. Save State
-	store = &AuthTokenStore{
-		AccessToken:  token.AccessToken,
-		RefreshToken: token.RefreshToken,
-		Expiry:       token.Expiry.Format(time.RFC3339),
-	}
-
-	if err := saveAuthStore(store); err != nil {
-		return fmt.Errorf("failed to save auth state: %w", err)
-	}
-
-	fmt.Println("✅ Successfully logged in!")
-	return nil
-}
-
-func generateRandomString(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
+	// 1. Interactive OIDC Login via AuthManager
+	return manager.InteractiveLogin(ctx)
 }

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // AuthTokenStore holds the persisted authentication token (OIDC) or credentials (Basic).
@@ -13,13 +15,51 @@ type AuthTokenStore struct {
 	AccessToken  string `json:"access_token,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Expiry       string `json:"expiry,omitempty"`
-	
+
 	// Basic Auth Fields
 	BasicAuthUsername string `json:"basic_auth_username,omitempty"`
 	BasicAuthPassword string `json:"basic_auth_password,omitempty"`
 }
 
-// IsValid checks if the token is present and not expired (with optional buffer), 
+// ClearBasicAuth clears basic auth credentials
+func (s *AuthTokenStore) ClearBasicAuth() {
+	s.BasicAuthUsername = ""
+	s.BasicAuthPassword = ""
+}
+
+// ClearOIDC clears OIDC tokens
+func (s *AuthTokenStore) ClearOIDC() {
+	s.AccessToken = ""
+	s.RefreshToken = ""
+	s.Expiry = ""
+}
+
+// ToToken converts the store to an oauth2.Token
+func (s *AuthTokenStore) ToToken() *oauth2.Token {
+	t := &oauth2.Token{
+		AccessToken:  s.AccessToken,
+		RefreshToken: s.RefreshToken,
+		TokenType:    "Bearer",
+	}
+
+	if s.Expiry != "" {
+		if expiry, err := time.Parse(time.RFC3339, s.Expiry); err == nil {
+			t.Expiry = expiry
+		}
+	}
+	return t
+}
+
+// UpdateFromToken updates the store from an oauth2.Token
+func (s *AuthTokenStore) UpdateFromToken(t *oauth2.Token) {
+	s.AccessToken = t.AccessToken
+	s.RefreshToken = t.RefreshToken
+	if !t.Expiry.IsZero() {
+		s.Expiry = t.Expiry.Format(time.RFC3339)
+	}
+}
+
+// IsValid checks if the token is present and not expired (with optional buffer),
 // OR if valid basic auth credentials are present.
 func (s *AuthTokenStore) IsValid() bool {
 	// 1. Check Basic Auth (Preferred if present? Or should OIDC take precedence? Let's treat valid if either is good)
@@ -31,7 +71,7 @@ func (s *AuthTokenStore) IsValid() bool {
 	if s.AccessToken == "" {
 		return false
 	}
-	
+
 	// If expiry is set, check it; otherwise assume good (or handle as needed)
 	if s.Expiry != "" {
 		expiry, err := time.Parse(time.RFC3339, s.Expiry)

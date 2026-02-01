@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +24,7 @@ var streamCmd = &cobra.Command{
 		gatewayAddr, _ := cmd.Flags().GetString("gateway")
 		username, _ := cmd.Flags().GetString("username")
 		password, _ := cmd.Flags().GetString("password")
+		oauthMode, _ := cmd.Flags().GetBool("oauth")
 		forwardURL, _ := cmd.Flags().GetString("forward-url")
 		port, _ := cmd.Flags().GetInt("port")
 		insecure, _ := cmd.Flags().GetBool("insecure")
@@ -41,26 +41,55 @@ var streamCmd = &cobra.Command{
 			forwardURL = fmt.Sprintf("http://localhost:%d", port)
 		}
 
-		// Build auth header
-		authHeader := ""
+		// Mutually exclusive auth flags
+		if oauthMode && (username != "" || password != "") {
+			return fmt.Errorf("--oauth flag is mutually exclusive with --username/--password")
+		}
+
+		// Initialize Store
+		store, err := loadAuthStore()
+		if err != nil || store == nil {
+			store = &AuthTokenStore{}
+		}
+
+		// PERSISTENCE LOGIC overrides
 		if username != "" && password != "" {
-			credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-			authHeader = "Basic " + credentials
-		} else {
-			// Try to load token/creds from auth store
-			store, err := loadAuthStore()
-			if err == nil && store != nil && store.IsValid() {
-				if store.AccessToken != "" {
-					authHeader = "Bearer " + store.AccessToken
-				} else if store.BasicAuthUsername != "" && store.BasicAuthPassword != "" {
-					credentials := base64.StdEncoding.EncodeToString([]byte(store.BasicAuthUsername + ":" + store.BasicAuthPassword))
-					authHeader = "Basic " + credentials
+			// Explicit Basic Auth -> Overwrite Store
+			fmt.Printf("Using provided Basic Auth credentials for user: %s\n", username)
+			store.ClearOIDC()
+			store.BasicAuthUsername = username
+			store.BasicAuthPassword = password
+			if err := saveAuthStore(store); err != nil {
+				return fmt.Errorf("failed to save credentials: %w", err)
+			}
+		} else if oauthMode {
+			// Explicit OAuth -> Clear Basic Auth in Store
+			// Logic handled by AuthManager? No, better do it here to ensure "Last Write Wins" semantics
+			if store.BasicAuthUsername != "" {
+				fmt.Println("Switching to OAuth mode (clearing Basic Auth)...")
+				store.ClearBasicAuth()
+				if err := saveAuthStore(store); err != nil {
+					return fmt.Errorf("failed to save auth state: %w", err)
 				}
 			}
 		}
 
-		if authHeader == "" {
-			return fmt.Errorf("authentication required: provide username/password or login first")
+		// AUTH MANAGER LOGIC
+		authManager := NewAuthManager(store)
+		
+		// Get Header (Force OAuth if flag set, otherwise infer from store)
+		// If explicit Basic Auth flags were passed, they are now in the store, so GetAuthHeader will pick them up
+		// unless we force OIDC. But wait, if we passed basic auth flags, we want basic auth.
+		// If we passed --oauth, we want OAuth. 
+		// If we passed NOTHING, we want whatever is in store.
+
+		// If username/password flags were set, we definitely don't want to force OAuth.
+		// If oauth flag was set, we force OAuth.
+		
+		ctx := context.Background()
+		authHeader, err := authManager.GetAuthHeader(ctx, true, oauthMode)
+		if err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
 		}
 
 		// Connect to streaming gateway via gRPC
@@ -74,9 +103,8 @@ var streamCmd = &cobra.Command{
 		client := streamingv1.NewStreamingServiceClient(conn)
 
 		// Create authenticated context
-		ctx := context.Background()
 		ctx = AuthenticatedContext(ctx, authHeader)
-
+		
 		// Determine stream ID
 		var streamID string
 		if len(args) > 0 {
@@ -265,6 +293,7 @@ func init() {
 	streamCmd.Flags().Bool("insecure", false, "Use insecure connection (no TLS)")
 	streamCmd.Flags().String("from", "", "Start replay from timestamp (RFC3339) or duration relative to now (e.g. 1h)")
 	streamCmd.Flags().String("to", "", "End replay at timestamp (RFC3339)")
+	streamCmd.Flags().Bool("oauth", false, "Force OIDC authentication (ignores/clears basic auth)")
 
 	rootCmd.AddCommand(streamCmd)
 }
